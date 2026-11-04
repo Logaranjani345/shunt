@@ -25,7 +25,7 @@ answer it well and history becomes a backing-store swap rather than a redesign.
 
 ## Current surface
 
-Every instrument in `src/metrics.rs:39`, and whether anything in-process can
+Every instrument in `OtelInstruments`, and whether anything in-process can
 read it:
 
 | Instrument | Type | Readable in-process |
@@ -49,10 +49,9 @@ read it:
 | `shunt.router.decisions` | `Counter<u64>` | no |
 | `shunt.router.judge_calls` | `Counter<u64>` | no |
 | `shunt.store.write_failures` | `Counter<u64>` | no |
-| `shunt.pool.quota_utilization` | `ObservableGauge<f64>` | **yes** — `pool_utilization_values()` (`src/metrics.rs:62`) |
+| `shunt.pool.quota_utilization` | `ObservableGauge<f64>` | **yes** — `pool_utilization_values()` |
 | `shunt.pool.quota_headroom_seconds` | `ObservableGauge<f64>` | **yes** — computed at collection from live `AccountPool` state through a registered source (`register_pool_headroom_source`, `src/metrics.rs`); Sentry gets a sample every 60 s and after each usage-poll pass |
-| `shunt.upstream.status` | `ObservableGauge<f64>` | **yes** — `upstream_status_values()` (`src/metrics.rs:74`) |
-
+| `shunt.upstream.status` | `ObservableGauge<f64>` | **yes** — `upstream_status_values()` |
 `shunt.store.write_failures` (label `subsystem` = `pool` | `spend` | `gateway`) was
 added with the optional store (`src/metrics.rs`, `record_store_write_failure`); it
 is also sent to Sentry as a counter of the same name when `[sentry] metrics` is on.
@@ -63,9 +62,9 @@ write-only and the three observable gauges are readable.
 
 Nineteen of twenty-two are write-only: `Counter` and `Histogram` handles expose
 `add()` and `record()` and nothing that returns a value. The `*_for_tests`
-helpers (`src/metrics.rs:342`, `src/metrics.rs:677`) are not a counter-example —
+helpers (`pool_reprobe_count_for_tests()`, `codex_ws_overflow_count_for_tests()`) are not a counter-example —
 they read `Mutex<HashMap>` tables that the recording functions populate inside
-a `#[cfg(test)]` block (`src/metrics.rs:319-327`), not the instruments. Those
+a `#[cfg(test)]` block (`record_pool_reprobe()`), not the instruments. Those
 tables do not exist in a release build.
 
 The three exceptions are the shape this document generalizes. An observable gauge
@@ -80,7 +79,7 @@ nineteen, because a gauge requires it and a counter does not.
 `[otel] endpoint` — before calling `telemetry::init`. With no endpoint
 configured, no meter provider is installed and `opentelemetry::global::meter()`
 returns a no-op; the instruments are inert by construction, as the doc comment
-at `src/metrics.rs:36` states.
+at `the module-level documentation comment` states.
 
 This is what rules out the otherwise-obvious answer. Any design that reads
 values back *through* the SDK inherits that condition, and a dashboard that only
@@ -132,7 +131,7 @@ so both sinks stay event-driven and no call site changes.
 
 The distinction is load-bearing for the nineteen counters and histograms. They
 push once per observation — Sentry `capture()`, OTel `add()`/`record()`
-(`src/metrics.rs:423-443`) — and only the three observable gauges are read by a
+(`record_proxied_request()`) — and only the three observable gauges are read by a
 callback at collection time. Feeding a running aggregate into `add()` would
 accumulate it a second time (1 + 2 + 3 + …), and replacing the per-observation
 writes with a callback would stop those series exporting at all. So the
@@ -201,7 +200,7 @@ The ring is keyed by label set, so unbounded labels are not a collector's
 problem here — they are a memory leak in shunt, reachable by a client that sends
 a novel `model` string per request.
 
-`src/metrics.rs:423` (`record_proxied_request`) passes `model` verbatim into both
+`record_proxied_request()` passes `model` verbatim into both
 sinks with no length cap and no cardinality bound. `sanitize_model_tag` exists
 (`src/observability.rs:173`) but is called only on the Sentry span and event path
 (`src/observability.rs:184`, `:285`, `:474`) — never from `src/metrics.rs`,
@@ -222,7 +221,7 @@ Both call sites can carry a client-controlled string:
 Two consequences worth recording, because both are drift that a reader would
 otherwise have to rediscover:
 
-- The module doc at `src/metrics.rs:19-22` states that attributes "stay
+- The module doc at `the module-level attribute documentation` states that attributes "stay
   low-cardinality (provider/model/status/…)". For `model` that is a design
   intent, not a property the code enforces.
 - Issue #296 is titled `fix(codex): bound the inbound model metrics label
@@ -288,9 +287,9 @@ the memory of the process.
 
 - The aggregate's readback is unit-testable without either sink configured —
   which is the property that distinguishes it from today's instruments, so a
-  test asserting a recorded value is visible with no provider installed is the
-  non-vacuous form. The existing `record_is_noop_without_sinks` family
-  (`src/metrics.rs:692`) pins the *current* contract and must be revisited
+  test asserting a recorded value is visible with no provider installed is the non-vacuous form.
+  The existing `record_is_noop_without_sinks` family
+(the metrics test module) pins the *current* contract and must be revisited
   deliberately rather than deleted: "no export without a sink" stays true; "no
   value retained without a sink" is what changes.
 - Cardinality bounding needs a positive test that a saturating label stream
